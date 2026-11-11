@@ -10,191 +10,226 @@ import {
 export class GuildScheduledEventAlert {
   id: string;
   guild_id: string;
-  start: Date | null;
-  leadTime: Date | null;
+  start: Date;
+  leadTime: Date;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(id: string, guild_id: string, start: Date, reminderTime: Date) {
+  constructor(
+    id: string,
+    guild_id: string,
+    start: Date,
+    reminderTime: Date,
+  ) {
     this.id = id;
-    this.start = start;
     this.guild_id = guild_id;
+    this.start = start;
     this.leadTime = reminderTime;
-    let alert_delay = undefined;
-    try {
-      alert_delay = reminderTime.getTime() - new Date().getTime();
-    } catch (er) {
+
+    const alertDelay = reminderTime.getTime() - Date.now();
+
+    if (!Number.isFinite(alertDelay)) {
       console.error(
-        `Lead Time (${reminderTime}) is undefined during timeout setup.`,
+        `Invalid reminder time (${reminderTime}) during timeout setup.`,
       );
       return;
     }
-    const g = bot_client.guilds.cache.get(guild_id);
-    if (g?.id === "1030185189265133677" || g?.name === "Yutzin's Hive") {
-      alert_delay = 1000;
+
+    if (this.start.getTime() <= Date.now() || alertDelay <= 0) {
+      return;
     }
 
-    if (this.start > new Date() && alert_delay > 0) {
-      this.timeoutId = this.longTimeout(async () => {
+    let delay = alertDelay;
+
+    // Special handling for this guild.
+    const guild = bot_client.guilds.cache.get(guild_id);
+    if (guild?.id === "1030185189265133677" || guild?.name === "Yutzin's Hive") {
+      delay = 1000;
+    }
+
+    this.timeoutId = this.longTimeout(async () => {
+      try {
         const guild = await bot_client.guilds.fetch(this.guild_id);
-        if (!guild) {
-          console.error("Error fetching guild");
+
+        const event = guild.scheduledEvents.cache.get(this.id);
+
+        if (!event) {
+          console.error(
+            `Scheduled event ${this.id} no longer exists in guild ${guild.name}.`,
+          );
           return;
         }
-        const botMember = guild.members.cache.get(bot_client.user!.id);
-        // Iterate over all channels in the guild
-        for (const channel of (await guild.channels.fetch()).values()) {
-          // Check if the channel is a text-based channel
-          if (channel && botMember) {
-            // Fetch the bot's permissions in the channel
-            const permissions = channel.permissionsFor(botMember);
 
-            // Check if the bot has permission to send messages
-            if (
-              permissions &&
-              permissions.has(PermissionFlagsBits.SendMessages)
-            ) {
-              let event = guild.scheduledEvents.cache.get(this.id);
+        const botUser = bot_client.user;
 
-              const subscribers = await event!.fetchSubscribers();
+        if (!botUser) {
+          console.error("Bot user is unavailable.");
+          return;
+        }
 
-              console.log(`Subscribers for ${event!.name}:`);
-              subscribers.forEach((subscriber) => {
-                console.log(subscriber.user.tag); // Prints the usernames of subscribers
+        const botMember = await guild.members.fetch(botUser.id);
+
+        const subscribers = await event.fetchSubscribers();
+
+        console.log(`Subscribers for ${event.name}:`);
+        subscribers.forEach((subscriber) => {
+          console.log(subscriber.user.tag);
+        });
+
+        const startTimestamp = Math.floor(this.start.getTime() / 1000);
+
+        const attendeeString = subscribers
+          .map((subscriber) => `<@${subscriber.user.id}>`)
+          .join(" ");
+
+        const msg =
+          `${event.url}\n` +
+          `${event.name} scheduled to start <t:${startTimestamp}:R>, ` +
+          `${attendeeString} please join!\n`;
+
+        const attendeeStatusEmbed = new EmbedBuilder()
+          .setTitle(`📅 ${event.name}`)
+          .setDescription(`Event starts <t:${startTimestamp}:R>`)
+          .addFields({
+            name: "👥 Attendees",
+            value:
+              subscribers.map((subscriber) => subscriber.user.tag).join("\n") ||
+              "None",
+            inline: true,
+          })
+          .setColor(0x5865f2)
+          .setTimestamp();
+
+        const buttons: ButtonBuilder[] = [];
+
+        const showButton = new ButtonBuilder()
+          .setLabel("Will join")
+          .setStyle(ButtonStyle.Success)
+          .setCustomId(`will_show${event.id}`);
+
+        buttons.push(showButton);
+
+        const noshowButton = new ButtonBuilder()
+          .setLabel("Can't join")
+          .setStyle(ButtonStyle.Danger)
+          .setCustomId(`no_show${event.id}`);
+
+        buttons.push(noshowButton);
+
+        if (event.channel) {
+          const joinChannelButton = new ButtonBuilder()
+            .setLabel("Event link")
+            .setStyle(ButtonStyle.Link)
+            .setURL(event.channel.url);
+
+          buttons.push(joinChannelButton);
+        }
+
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+          buttons,
+        );
+
+        // Find the first text-based channel where the bot can send messages.
+        const channels = await guild.channels.fetch();
+
+        for (const channel of channels.values()) {
+          if (!channel || !channel.isTextBased()) {
+            continue;
+          }
+
+          const permissions = channel.permissionsFor(botMember);
+
+          if (!permissions?.has(PermissionFlagsBits.SendMessages)) {
+            continue;
+          }
+
+          const embedPermission = permissions.has(
+            PermissionFlagsBits.EmbedLinks,
+          );
+
+          console.log(`Channel ${channel.name} permissions:`, {
+            sendMessages: true,
+            embedLinks: embedPermission,
+          });
+
+          try {
+            if (!embedPermission) {
+              console.warn(
+                `Bot missing EmbedLinks permission in channel ${channel.name} ` +
+                `(${channel.id}) in guild ${guild.name}`,
+              );
+
+              await channel.send({
+                content:
+                  msg +
+                  "\n(Note: Enhanced display requires EmbedLinks permission)",
+                components: [row],
+              });
+            } else {
+              await channel.send({
+                content: msg,
+                components: [row],
+                embeds: [attendeeStatusEmbed],
+              });
+            }
+
+            // Successfully sent the alert.
+            break;
+          } catch (error) {
+            console.error(
+              `Error sending message in channel ${channel.name} (${guild.name}):`,
+              error,
+            );
+
+            // Try a plain message without buttons/embed.
+            try {
+              await channel.send({
+                content:
+                  msg + "\n(Buttons unavailable - check bot permissions)",
               });
 
-              try {
-                if (event?.channel) {
-                  for (let member of event!.channel!.members.values()) {
-                    // Members. . .
-                  }
-                }
-              } catch (error) {
-                console.error("failed to fetch members of the event channel.");
-              }
-              let atty_string = subscribers
-                .map((atty) => `<@${atty.user.id}>`)
-                .join(" ");
-              let msg = `${event?.url}\n${event?.name} scheduled to start <t:${Math.floor(start.getTime() / 1000)}:R>, ${atty_string} please join!\n`;
-
-              let attendee_status_embed = new EmbedBuilder()
-                .setTitle(`📅 ${event?.name}`)
-                .setDescription(
-                  `Event starts <t:${Math.floor(start.getTime() / 1000)}:R>`,
-                )
-                .addFields({
-                  name: "👥 Attendees",
-                  value:
-                    subscribers.map((atty) => atty.user.tag).join("\n") ||
-                    "None",
-                  inline: true,
-                })
-                .setColor(0x5865f2)
-                .setTimestamp();
-              let buttons = [];
-              let showButton = new ButtonBuilder()
-                .setLabel("Will join")
-                .setStyle(ButtonStyle.Success)
-                .setCustomId(`will_show${event?.id}`);
-              buttons.push(showButton);
-
-              let noshowButton = new ButtonBuilder()
-                .setLabel("Can't join")
-                .setStyle(ButtonStyle.Danger)
-                .setCustomId(`no_show${event?.id}`);
-              buttons.push(noshowButton);
-
-              if (event?.channel) {
-                let joinChannelButton = new ButtonBuilder()
-                  .setLabel("Event link")
-                  .setStyle(ButtonStyle.Link)
-                  .setURL(event.channel.url);
-                buttons.push(joinChannelButton);
-              }
-
-              let row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-                buttons,
+              // Plain message succeeded, so we're done.
+              break;
+            } catch (fallbackError) {
+              console.error(
+                "Fallback message also failed:",
+                fallbackError,
               );
-              try {
-                // Check if bot has permissions for buttons/components
-                const embedPermission =
-                  permissions &&
-                  permissions.has(PermissionFlagsBits.EmbedLinks);
-                const useExternalEmojisPermission =
-                  permissions &&
-                  permissions.has(PermissionFlagsBits.UseExternalEmojis);
-
-                // Log permission status for debugging
-                console.log(`Channel ${channel.name} permissions:`, {
-                  sendMessages: permissions?.has(
-                    PermissionFlagsBits.SendMessages,
-                  ),
-                  embedLinks: embedPermission,
-                  useExternalEmojis: useExternalEmojisPermission,
-                });
-
-                if (!embedPermission) {
-                  console.warn(
-                    `Bot missing EmbedLinks permission in channel ${channel.name} (${channel.id}) in guild ${guild.name}`,
-                  );
-                  // Send without embed but keep buttons
-                  await channel.send({
-                    content:
-                      msg +
-                      "\n(Note: Enhanced display requires EmbedLinks permission)",
-                    components: [row],
-                  });
-                } else {
-                  await channel.send({
-                    content: msg,
-                    components: [row],
-                    embeds: [attendee_status_embed],
-                  });
-                }
-              } catch (error) {
-                console.error(
-                  `Error sending message in channel ${channel?.name} (${guild.name}):`,
-                  error,
-                );
-
-                // Fallback: try sending without components if there's an error
-                try {
-                  await channel.send({
-                    content:
-                      msg + "\n(Buttons unavailable - check bot permissions)",
-                  });
-                } catch (fallbackError) {
-                  console.error(`Fallback message also failed:`, fallbackError);
-                }
-                continue;
-              }
-
-              break; // Break out of the loop on the first writable channel
             }
           }
         }
-      }, alert_delay);
-      console.log(this.timeoutId);
-    }
+      } catch (error) {
+        console.error(
+          `Failed to send scheduled event alert for event ${this.id}:`,
+          error,
+        );
+      }
+    }, delay);
+
+    console.log(this.timeoutId);
   }
-  cancel() {
-    if (this.timeoutId) {
+
+  cancel(): void {
+    if (this.timeoutId !== null) {
       clearTimeout(this.timeoutId);
       this.timeoutId = null;
     }
   }
 
-  private longTimeout(callback: Bun.TimerHandler, delay: number): Timer {
-    const maxDelay = 2147483647;
-    if (delay <= 0) {
-      return setTimeout(() => {}, 0);
-    }
-    if (delay > maxDelay) {
-      return setTimeout(
-        () => this.longTimeout(callback, delay - maxDelay),
-        maxDelay,
-      );
-    } else {
+  private longTimeout(
+    callback: () => void | Promise<void>,
+    delay: number,
+  ): ReturnType<typeof setTimeout> {
+    const maxDelay = 2_147_483_647;
+
+    if (delay <= maxDelay) {
       return setTimeout(callback, delay);
     }
+
+    return setTimeout(() => {
+      this.timeoutId = this.longTimeout(
+        callback,
+        delay - maxDelay,
+      );
+    }, maxDelay);
   }
 }
