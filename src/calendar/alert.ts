@@ -38,14 +38,6 @@ export class GuildScheduledEventAlert {
       return;
     }
 
-    let delay = alertDelay;
-
-    // Special handling for this guild.
-    const guild = bot_client.guilds.cache.get(guild_id);
-    if (guild?.id === "1030185189265133677" || guild?.name === "Yutzin's Hive") {
-      delay = 1000;
-    }
-
     this.timeoutId = this.longTimeout(async () => {
       try {
         const guild = await bot_client.guilds.fetch(this.guild_id);
@@ -203,7 +195,7 @@ export class GuildScheduledEventAlert {
           error,
         );
       }
-    }, delay);
+    }, alertDelay);
 
     console.log(this.timeoutId);
   }

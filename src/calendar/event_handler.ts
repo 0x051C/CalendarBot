@@ -269,8 +269,10 @@ export class EventHandler {
   async diagnoseBotPermissions(guild: DiscordGuild) {
     console.log(`\n=== Permission Diagnostic for ${guild.name} ===`);
 
-    const botMember = guild.members.cache.get(this.client.user!.id);
-    if (!botMember) {
+    let botMember;
+    try {
+      botMember = await guild.members.fetchMe();
+    } catch {
       console.error("Bot is not a member of this guild!");
       return;
     }

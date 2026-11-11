@@ -4,6 +4,7 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
 ![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 A Discord bot that turns a server's **Scheduled Events** into something people actually show up to.
 It posts a reminder shortly before each event, @mentions everyone who marked themselves as interested,
@@ -57,10 +58,8 @@ Discord Gateway ──► index.ts (event wiring)
 ### 1. Create the Discord application
 
 1. Create an application at the [Discord Developer Portal](https://discord.com/developers/applications)
-   and add a bot user.
-2. Under **Bot → Privileged Gateway Intents**, enable **Server Members Intent** and
-   **Message Content Intent**.
-3. Invite the bot with the `bot` and `applications.commands` scopes and these permissions:
+   and add a bot user. No privileged gateway intents are required.
+2. Invite the bot with the `bot` and `applications.commands` scopes and these permissions:
    *View Channels*, *Send Messages*, *Embed Links*, *Manage Events* (needed for creator-cancel).
 
 ### 2. Run locally
@@ -115,3 +114,7 @@ Pushing a `v*` tag publishes the Docker image to GHCR and creates a GitHub Relea
 
 TypeScript (strict) · [Bun](https://bun.sh) · [discord.js v14](https://discord.js.org) ·
 [ical-generator](https://github.com/sebbo2002/ical-generator) · Docker · GitHub Actions
+
+## License
+
+[MIT](LICENSE)
