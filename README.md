@@ -86,6 +86,20 @@ docker run -d --name calendarbot \
 
 Tagged releases are also published to GHCR: `ghcr.io/0x051c/calendarbot:latest`.
 
+### 4. Or deploy with pm2 (e.g. on a Raspberry Pi)
+
+The bundle is a single dependency-free file, which suits small boards like a Pi Zero 2 W (~95 MB RAM in use).
+It needs Node ≥ 22 on the target.
+
+```bash
+bun run build
+scp release/index.mjs deploy/ecosystem.config.cjs pi:calendarbot/
+ssh pi 'cd calendarbot && echo "DISCORD_TOKEN=..." > .env && chmod 600 .env && pm2 start ecosystem.config.cjs && pm2 save'
+```
+
+`deploy/ecosystem.config.cjs` loads the token from `.env` via Node's `--env-file`, caps memory, and backs
+off on crash loops. Run `pm2 startup` once on the host to restart the bot on boot.
+
 ### Configuration
 
 | Variable | Default | Description |

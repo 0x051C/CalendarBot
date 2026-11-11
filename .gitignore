@@ -182,3 +182,4 @@ ical/*
 release/
 
 !.env.example
+!deploy/ecosystem.config.cjs

@@ -196,8 +196,6 @@ export class GuildScheduledEventAlert {
         );
       }
     }, alertDelay);
-
-    console.log(this.timeoutId);
   }
 
   cancel(): void {
