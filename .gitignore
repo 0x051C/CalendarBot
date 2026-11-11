@@ -177,3 +177,8 @@ dist
 #MY DEFINES
 ical/*
 /CalendarBot
+
+# Build output
+release/
+
+!.env.example

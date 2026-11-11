@@ -1,11 +1,19 @@
-# Use the official Node.js 20 image as the base
-FROM node:20
+# --- Build stage: bundle the TypeScript sources with Bun ---------------------
+FROM oven/bun:1 AS build
+WORKDIR /src
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY tsconfig.json index.ts ./
+COPY src ./src
+RUN bun run typecheck && bun run build
 
-# Set the working directory inside the container
+# --- Runtime stage: run the single-file bundle on plain Node -----------------
+FROM node:24-alpine
 WORKDIR /app
-
-# Copy the artifact (Bun build output) from the build process into the container
-COPY ./release/ .
-
-# Command to run the built app using Node.js when the container starts
-CMD ["node", "index.js"]
+ENV NODE_ENV=production \
+    ICAL_PATH=/data/ical
+COPY --from=build /src/release/index.mjs ./index.mjs
+RUN mkdir -p /data/ical && chown -R node:node /data
+USER node
+VOLUME ["/data"]
+CMD ["node", "index.mjs"]

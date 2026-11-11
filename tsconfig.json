@@ -4,8 +4,7 @@
     "target": "ESNext",
     "module": "ESNext",
     "moduleDetection": "force",
-    "jsx": "react-jsx",
-    "allowJs": true,
+    "types": ["bun"],
 
     /* Bundler mode */
     "moduleResolution": "bundler",
@@ -18,5 +17,6 @@
     "strict": true,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true
-  }
+  },
+  "include": ["index.ts", "src/**/*.ts"]
 }

@@ -8,7 +8,7 @@ import {
 } from "discord.js";
 import type {
   ButtonInteraction,
-  CommandInteraction,
+  ChatInputCommandInteraction,
   GuildScheduledEvent,
   PartialGuildScheduledEvent,
   User,
@@ -150,17 +150,21 @@ export class EventHandler {
     write_calendar_file(this_ical.toString(), se.guild?.name ?? "Unknown");
   }
 
-  async slash_commands(interaction: CommandInteraction) {
+  async slash_commands(interaction: ChatInputCommandInteraction) {
     const { commandName } = interaction;
     if (commandName === "alert") {
-      const minutes = interaction.options.get("minutes");
-      if (minutes) {
-        this.alert_offset = parseInt(minutes?.value?.toString() || "5");
-        this.fetch_events(interaction.guild);
+      const minutes = interaction.options.getInteger("minutes");
+      if (minutes !== null) {
+        this.alert_offset = minutes;
       }
       await interaction.reply(
-        `alert lead time is set to: ${this.alert_offset}`,
+        `Alert lead time is set to ${this.alert_offset} minute(s).`,
       );
+      if (minutes !== null) {
+        // Reschedule alerts with the new lead time (after replying, so we
+        // stay within Discord's 3s interaction deadline).
+        await this.fetch_events(interaction.guild);
+      }
     }
   }
 

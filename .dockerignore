@@ -1,0 +1,9 @@
+node_modules
+release
+ical
+.git
+.github
+.vscode
+.env*
+ecosystem.*
+CalendarBot
