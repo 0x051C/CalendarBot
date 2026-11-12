@@ -183,3 +183,6 @@ release/
 
 !.env.example
 !deploy/ecosystem.config.cjs
+
+# Local experiments
+.scratch/

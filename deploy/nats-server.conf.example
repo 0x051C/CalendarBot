@@ -1,0 +1,31 @@
+# NATS for CalendarBot: JetStream + authentication via a dedicated account.
+#
+# The CALENDARBOT account is an isolated namespace: its subjects, KV buckets and
+# streams are invisible to every other account on the server, and no client can
+# connect without credentials (there is no `no_auth_user`).
+# deploy/setup-pi.sh generates this file with a random password.
+
+server_name: calendarbot-nats
+listen: 127.0.0.1:4222      # use 0.0.0.0 + TLS (below) once instances run on other hosts
+http: 127.0.0.1:8222        # monitoring: /healthz /varz /jsz
+
+jetstream {
+  store_dir: /var/lib/nats
+  max_memory_store: 16MB
+  max_file_store: 512MB
+}
+
+accounts {
+  CALENDARBOT {
+    jetstream: { max_mem: 16MB, max_file: 512MB }
+    users: [
+      { user: calendarbot, password: "CHANGE_ME" }
+    ]
+  }
+}
+
+# For instances on other machines, enable TLS and point them at tls://host:4222:
+# tls {
+#   cert_file: /etc/nats/server-cert.pem
+#   key_file:  /etc/nats/server-key.pem
+# }
