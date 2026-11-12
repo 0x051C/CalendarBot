@@ -7,7 +7,7 @@ import { EventRepository } from "../src/db/repos/events";
 import { GuildRepository } from "../src/db/repos/guilds";
 import { SyncRepository } from "../src/db/repos/sync";
 import type { NewScheduledEvent } from "../src/db/schema";
-import { describeLink, parseEventLink } from "../src/discord/commands/sync-command";
+import { describeLink, parseEventReference } from "../src/discord/commands/sync-command";
 import { SyncService, type GuildLocator } from "../src/sync/sync-service";
 import { createTestDatabase } from "./helpers/db";
 import { silentLogger } from "./helpers/logger";
@@ -243,10 +243,21 @@ describe("SyncService.reconcile", () => {
 });
 
 describe("/sync input parsing", () => {
-  test("event links", () => {
-    expect(parseEventLink(`https://discord.com/events/${A}/1300000000000000001`)).toEqual({ guildId: A, eventId: "1300000000000000001" });
-    expect(parseEventLink(`https://ptb.discord.com/events/${A}/1300000000000000001?foo`)?.guildId).toBe(A);
-    expect(parseEventLink("https://example.com/events/1/2")).toBeNull();
+  test("Copy Event Link format, incl. other hosts and recurring occurrences", () => {
+    const ev = "1300000000000000001";
+    expect(parseEventReference(`https://discord.com/events/${A}/${ev}`)).toEqual({ kind: "event", guildId: A, eventId: ev });
+    expect(parseEventReference(`  https://ptb.discord.com/events/${A}/${ev}?foo  `)).toMatchObject({ guildId: A, eventId: ev });
+    expect(parseEventReference(`https://discordapp.com/events/${A}/${ev}/1700000000000000000`)).toMatchObject({ guildId: A, eventId: ev });
+  });
+  test("Share (invite) link format", () => {
+    const ev = "1300000000000000001";
+    expect(parseEventReference(`https://discord.gg/abcDEF12?event=${ev}`)).toEqual({ kind: "invite", code: "abcDEF12", eventId: ev });
+    expect(parseEventReference(`https://discord.com/invite/my-vanity?utm=x&event=${ev}`)).toEqual({ kind: "invite", code: "my-vanity", eventId: ev });
+  });
+  test("rejects other input", () => {
+    for (const bad of ["https://example.com/events/1/2", "https://discord.gg/abc", "1300000000000000001", "Test Event"]) {
+      expect(parseEventReference(bad)).toBeNull();
+    }
   });
   test("link descriptions", () => {
     expect(describeLink({ sourceGuildId: A, sourceGuildName: "TreeHouse", sourceEventId: null, sourceEventName: null })).toBe("All events from TreeHouse");

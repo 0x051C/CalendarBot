@@ -9,6 +9,7 @@ import {
 } from "discord.js";
 import type { GuildRepository } from "../../db/repos/guilds";
 import type { LinkView, SyncRepository } from "../../db/repos/sync";
+import type { Logger } from "../../logger";
 import type { InspectResult, SyncService } from "../../sync/sync-service";
 
 export const syncCommandDefinition = new SlashCommandBuilder()
@@ -41,13 +42,28 @@ export const syncCommandDefinition = new SlashCommandBuilder()
   );
 
 const SNOWFLAKE = /^\d{15,25}$/;
+// "Copy Event Link": https://discord.com/events/<guild>/<event>[/<occurrence>] (also ptb./canary./discordapp.com)
 const EVENT_LINK = /discord(?:app)?\.com\/events\/(\d{15,25})\/(\d{15,25})/;
+// "Share" button: https://discord.gg/<code>?event=<event> or https://discord.com/invite/<code>?event=<event>
+const INVITE_LINK = /(?:discord\.gg|discord(?:app)?\.com\/invite)\/([\w-]{2,64})\/?\?(?:[^#\s]*&)?event=(\d{15,25})/;
 
-/** Accepts an event link (`https://discord.com/events/<guild>/<event>`). */
-export function parseEventLink(input: string): { guildId: string; eventId: string } | null {
-  const m = EVENT_LINK.exec(input.trim());
-  return m ? { guildId: m[1]!, eventId: m[2]! } : null;
+export type EventReference =
+  | { kind: "event"; guildId: string; eventId: string }
+  | { kind: "invite"; code: string; eventId: string };
+
+/** Parse either kind of event link Discord produces. */
+export function parseEventReference(input: string): EventReference | null {
+  const text = input.trim();
+  const direct = EVENT_LINK.exec(text);
+  if (direct) return { kind: "event", guildId: direct[1]!, eventId: direct[2]! };
+  const invite = INVITE_LINK.exec(text);
+  if (invite) return { kind: "invite", code: invite[1]!, eventId: invite[2]! };
+  return null;
 }
+
+const LINK_HELP =
+  "Use either the event's **Share** link (`discord.gg/…?event=…`) or, with Developer Mode on, " +
+  "right-click the event → **Copy Event Link** (`discord.com/events/…`).";
 
 export function describeLink(l: Pick<LinkView, "sourceGuildName" | "sourceEventName" | "sourceEventId" | "sourceGuildId">): string {
   const server = l.sourceGuildName ?? `server ${l.sourceGuildId}`;
@@ -59,7 +75,13 @@ const ephemeral = MessageFlags.Ephemeral;
 
 export class SyncCommand {
   constructor(
-    private readonly deps: { sync: SyncRepository; guilds: GuildRepository; syncService: SyncService; defaultLeadMinutes: number },
+    private readonly deps: {
+      sync: SyncRepository;
+      guilds: GuildRepository;
+      syncService: SyncService;
+      defaultLeadMinutes: number;
+      logger: Logger;
+    },
   ) {}
 
   async handle(interaction: ChatInputCommandInteraction<"cached">): Promise<void> {
@@ -76,30 +98,44 @@ export class SyncCommand {
         return;
       }
     } else {
-      const link = parseEventLink(interaction.options.getString("link", true));
-      if (!link) {
-        await interaction.reply({ content: "That doesn't look like an event link. Open the event → **Copy Event Link**.", flags: ephemeral });
+      const input = interaction.options.getString("link", true);
+      const ref = parseEventReference(input);
+      if (!ref) {
+        this.deps.logger.info({ guildId: interaction.guildId, input: input.slice(0, 200) }, "rejected /sync event link");
+        await interaction.reply({ content: `That doesn't look like an event link. ${LINK_HELP}`, flags: ephemeral });
         return;
       }
-      ({ guildId: sourceGuildId, eventId: sourceEventId } = link);
+      sourceEventId = ref.eventId;
+      if (ref.kind === "event") {
+        sourceGuildId = ref.guildId;
+      } else {
+        // Invite links don't contain the server id; Discord resolves it (and checks the event exists).
+        await interaction.deferReply({ flags: ephemeral });
+        const invite = await interaction.client.fetchInvite(ref.code, { guildScheduledEventId: ref.eventId }).catch(() => null);
+        if (!invite?.guild) {
+          await interaction.editReply("❌ That invite link is invalid or has expired. Create a new one from the event's **Share** button.");
+          return;
+        }
+        sourceGuildId = invite.guild.id;
+      }
     }
     return this.add(interaction, sourceGuildId, sourceEventId);
   }
 
   private async add(interaction: ChatInputCommandInteraction<"cached">, sourceGuildId: string, sourceEventId: string | null) {
     const { guild } = interaction;
+    if (!interaction.deferred) await interaction.deferReply({ flags: ephemeral });
     if (sourceGuildId === guild.id) {
-      await interaction.reply({ content: "That's this server — pick a different one.", flags: ephemeral });
+      await interaction.editReply("That's this server. Pick a different one.");
       return;
     }
     const me = guild.members.me ?? (await guild.members.fetchMe());
     if (!me.permissions.has(PermissionFlagsBits.ManageEvents)) {
-      await interaction.reply({ content: "I need the **Manage Events** permission here to create the synced events.", flags: ephemeral });
+      await interaction.editReply("I need the **Manage Events** permission here to create the synced events.");
       return;
     }
 
     // The source server may live on a shard owned by another instance: ask it over NATS.
-    await interaction.deferReply({ flags: ephemeral });
     let source: InspectResult;
     try {
       source = await this.deps.syncService.inspect(sourceGuildId, interaction.user.id, sourceEventId);

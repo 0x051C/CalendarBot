@@ -147,6 +147,7 @@ async function main() {
     guilds,
     syncService,
     defaultLeadMinutes: config.defaultAlertLeadMinutes,
+    logger,
   });
 
   const coordinator = new ShardCoordinator({
