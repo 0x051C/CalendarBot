@@ -5,11 +5,34 @@
 ![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun&logoColor=white)
 ![discord.js](https://img.shields.io/badge/discord.js-v14-5865F2?logo=discord&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![v2: NATS JetStream](https://img.shields.io/badge/v2_(rewrite_branch)-NATS_JetStream_%2B_PostgreSQL-27AAE1?logo=natsdotio&logoColor=white)](https://github.com/0x051C/CalendarBot/pull/1)
 
 A Discord bot that turns a server's **Scheduled Events** into something people actually show up to.
 It posts a reminder shortly before each event, @mentions everyone who marked themselves as interested,
 lets members RSVP with buttons, and keeps an up-to-date **iCalendar (`.ics`) feed** of the server's
 events that can be imported into Google Calendar, Apple Calendar, Outlook, or any phone calendar app.
+
+> [!NOTE]
+> **v2 is in progress on the [`rewrite`](https://github.com/0x051C/CalendarBot/tree/rewrite) branch**
+> ([PR #1](https://github.com/0x051C/CalendarBot/pull/1)). It turns the bot into a horizontally
+> scalable cluster: run any number of identical instances, and they coordinate through
+> **[NATS](https://nats.io) JetStream**, with **PostgreSQL** as the source of truth.
+>
+> - **JetStream KV shard leases:** instances split Discord's gateway shards among themselves.
+>   A shard is claimed with `create`, renewed with a revision-checked `update`, and released
+>   automatically when the bucket TTL expires. Shards rebalance when an instance joins, and fail
+>   over within seconds when one crashes. An instance that can't renew its leases stops its shards itself.
+> - **JetStream KV presence and a cluster-wide IDENTIFY throttle:** heartbeats drive fair-share
+>   balancing, and a TTL-keyed slot bucket keeps every process within Discord's gateway rate limit.
+> - **NATS micro-services:** each instance registers itself, so `nats micro ls` and
+>   `nats req calendarbot.cluster ''` show the live shard map.
+> - **Exactly-once alerts on PostgreSQL** (Drizzle ORM): alerts are derived from SQL each tick and
+>   claimed with `INSERT … ON CONFLICT`, so no reminder is lost or doubled across instances.
+> - **A new `/alert channel` command** to choose where alerts are posted, plus `/healthz`,
+>   `/readyz` and Prometheus `/metrics`, and a `docker compose` stack with Postgres, NATS and 2 replicas.
+>
+> The design is written up in [`docs/ARCHITECTURE.md`](https://github.com/0x051C/CalendarBot/blob/rewrite/docs/ARCHITECTURE.md).
+> Everything below describes the current single-instance version on `main`.
 
 ## Features
 
@@ -126,8 +149,14 @@ Pushing a `v*` tag publishes the Docker image to GHCR and creates a GitHub Relea
 
 ## Tech stack
 
-TypeScript (strict) · [Bun](https://bun.sh) · [discord.js v14](https://discord.js.org) ·
+**v1 (`main`):** TypeScript (strict) · [Bun](https://bun.sh) · [discord.js v14](https://discord.js.org) ·
 [ical-generator](https://github.com/sebbo2002/ical-generator) · Docker · GitHub Actions
+
+**v2 ([`rewrite`](https://github.com/0x051C/CalendarBot/tree/rewrite)):** everything above, plus
+[NATS](https://nats.io) + JetStream KV (shard leases, presence, distributed rate limiting) ·
+NATS micro-services · PostgreSQL + [Drizzle ORM](https://orm.drizzle.team) · [zod](https://zod.dev) ·
+[pino](https://getpino.io) · Prometheus ([prom-client](https://github.com/siimon/prom-client)) ·
+[PGlite](https://pglite.dev) for tests · Docker Compose
 
 ## License
 
