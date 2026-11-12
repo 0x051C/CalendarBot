@@ -1,0 +1,220 @@
+import { REST, Routes, type RESTGetAPIGatewayBotResult } from "discord.js";
+import pkg from "../package.json" with { type: "json" };
+import { AlertScheduler } from "./alerts/alert-scheduler";
+import { AlertService } from "./alerts/alert-service";
+import { CalendarExporter } from "./calendar/exporter";
+import { NatsIdentifyThrottler } from "./cluster/identify-throttler";
+import { agreeOnShardCount, connectNats, openBuckets } from "./cluster/nats";
+import { ShardCoordinator } from "./cluster/shard-coordinator";
+import { startStatusService } from "./cluster/status-service";
+import { loadConfig } from "./config";
+import { connectDatabase } from "./db";
+import { AlertRepository } from "./db/repos/alerts";
+import { EventRepository } from "./db/repos/events";
+import { GuildRepository } from "./db/repos/guilds";
+import { RsvpRepository } from "./db/repos/rsvps";
+import { AlertCommand } from "./discord/commands/alert-command";
+import { EventSync } from "./discord/event-sync";
+import { ButtonHandler } from "./discord/interactions/buttons";
+import { ShardManager } from "./discord/shard-manager";
+import { ShardRunner } from "./discord/shard-runner";
+import { wireClient } from "./discord/wire";
+import { startHttpServer } from "./http/server";
+import { createLogger } from "./logger";
+import { createMetrics } from "./metrics";
+
+const SHUTDOWN_TIMEOUT_MS = 20_000;
+
+async function main() {
+  const config = loadConfig();
+  const logger = createLogger(config.logLevel, config.instanceId);
+  const metrics = createMetrics();
+  logger.info({ version: pkg.version, cluster: config.clusterName }, "starting calendarbot");
+
+  // --- Infrastructure -------------------------------------------------------
+  const database = connectDatabase(config.databaseUrl);
+  await database.migrate(config.migrationsDir);
+  logger.info("database migrations applied");
+
+  const nc = await connectNats(config.natsUrl, config.instanceId, logger);
+  const buckets = await openBuckets(nc, config.clusterName, config.leaseTtlMs);
+  const shardCount = await agreeOnShardCount(
+    buckets.config,
+    async () => (config.shardCount === "auto" ? recommendedShards(config.discordToken) : config.shardCount),
+    logger,
+  );
+  if (config.shardCount !== "auto" && config.shardCount !== shardCount) {
+    logger.warn(
+      { configured: config.shardCount, cluster: shardCount },
+      `SHARD_COUNT differs from the cluster's; using ${shardCount}. To reshard: stop all instances, run ` +
+        `\`nats kv del ${config.clusterName}_config shard_count\`, then start them again.`,
+    );
+  }
+
+  // --- Domain services ------------------------------------------------------
+  const { db } = database;
+  const guilds = new GuildRepository(db);
+  const events = new EventRepository(db);
+  const alerts = new AlertRepository(db);
+  const rsvps = new RsvpRepository(db);
+
+  const exporter = new CalendarExporter({
+    guilds,
+    events,
+    dir: config.icalPath,
+    defaultDurationSeconds: config.icalEventDurationSeconds,
+    logger,
+  });
+  const alertService = new AlertService({ alerts, rsvps, logger });
+  const eventSync = new EventSync({
+    guilds,
+    events,
+    alertService,
+    exporter,
+    defaultLeadMinutes: config.defaultAlertLeadMinutes,
+    logger,
+  });
+  const alertCommand = new AlertCommand({ guilds, events, defaultLeadMinutes: config.defaultAlertLeadMinutes });
+  const buttons = new ButtonHandler({ events, rsvps, alertService, eventSync });
+
+  // --- Discord shards -------------------------------------------------------
+  let shutdown: (reason: string, code?: number) => Promise<void> = async () => {};
+  const shards = new ShardManager({
+    shardCount,
+    logger,
+    createRunner: (shardId) =>
+      new ShardRunner({
+        shardId,
+        shardCount,
+        token: config.discordToken,
+        logger: logger.child({ shard: shardId }),
+        buildIdentifyThrottler: async (manager) => {
+          const info = await manager.fetchGatewayInformation();
+          return new NatsIdentifyThrottler(buckets.identify, info.session_start_limit.max_concurrency, config.instanceId);
+        },
+        wire: (client, id) =>
+          wireClient(client, id, {
+            eventSync,
+            guilds,
+            alertCommand,
+            buttons,
+            registerCommands: config.registerCommands,
+            logger,
+            metrics,
+          }),
+        onFatal: (err) => {
+          logger.fatal({ err }, "unrecoverable Discord error (check DISCORD_TOKEN)");
+          void shutdown("fatal discord error", 1);
+        },
+      }),
+  });
+
+  const coordinator = new ShardCoordinator({
+    leases: buckets.leases,
+    instances: buckets.instances,
+    instanceId: config.instanceId,
+    shardCount,
+    leaseTtlMs: config.leaseTtlMs,
+    logger,
+  });
+  coordinator.on("acquired", (id) => {
+    metrics.leaseEvents.inc({ event: "acquired" });
+    void shards.start(id);
+  });
+  coordinator.on("released", (id, reason) => {
+    metrics.leaseEvents.inc({ event: reason });
+    void shards.stop(id);
+  });
+
+  const scheduler = new AlertScheduler({
+    events,
+    alerts,
+    alertService,
+    shards,
+    instanceId: config.instanceId,
+    intervalMs: config.schedulerIntervalMs,
+    logger,
+    metrics,
+  });
+
+  // --- Observability --------------------------------------------------------
+  const status = await startStatusService({
+    nc,
+    cluster: config.clusterName,
+    version: pkg.version,
+    buckets,
+    local: () => ({ instanceId: config.instanceId, shards: shards.status() }),
+  });
+  const http =
+    config.httpPort > 0
+      ? await startHttpServer({
+          port: config.httpPort,
+          metrics,
+          logger,
+          checks: {
+            nats: () => !nc.isClosed() && !nc.isDraining(),
+            database: () => database.ping(),
+            shards: () => ({ owned: shards.ownedShardIds(), ready: shards.readyShardIds() }),
+          },
+          beforeScrape: () => {
+            metrics.shardsOwned.set(coordinator.ownedShards().length);
+            metrics.clusterInstances.set(coordinator.liveInstances);
+            metrics.shardReady.reset();
+            metrics.gatewayPing.reset();
+            for (const s of shards.status()) {
+              metrics.shardReady.set({ shard: String(s.id) }, s.ready ? 1 : 0);
+              if (s.ping !== null) metrics.gatewayPing.set({ shard: String(s.id) }, s.ping);
+            }
+          },
+        })
+      : null;
+
+  coordinator.start();
+  scheduler.start();
+  logger.info({ shardCount, leaseTtlMs: config.leaseTtlMs }, "joined cluster");
+
+  // --- Graceful shutdown ----------------------------------------------------
+  let stopping = false;
+  shutdown = async (reason: string, code = 0) => {
+    if (stopping) return;
+    stopping = true;
+    logger.info({ reason }, "shutting down");
+    const force = setTimeout(() => {
+      logger.error("shutdown timed out; exiting");
+      process.exit(1);
+    }, SHUTDOWN_TIMEOUT_MS);
+    force.unref();
+    try {
+      await scheduler.stop();
+      // Close gateway sessions before handing leases back, so two instances
+      // never serve the same shard at once.
+      await shards.stopAll();
+      await coordinator.stop();
+      await exporter.flush();
+      await status.stop();
+      await new Promise<void>((r) => (http ? http.close(() => r()) : r()));
+      await nc.drain();
+      await database.close();
+    } catch (err) {
+      logger.error({ err }, "error during shutdown");
+      code = code || 1;
+    }
+    logger.info("bye");
+    process.exit(code);
+  };
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("unhandledRejection", (err) => logger.error({ err }, "unhandled promise rejection"));
+}
+
+async function recommendedShards(token: string): Promise<number> {
+  const rest = new REST({ version: "10" }).setToken(token);
+  const info = (await rest.get(Routes.gatewayBot())) as RESTGetAPIGatewayBotResult;
+  return info.shards;
+}
+
+main().catch((err) => {
+  // The logger may not exist yet (e.g. invalid config), so fall back to stderr.
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});
