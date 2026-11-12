@@ -5,6 +5,8 @@ import {
   primaryKey,
   text,
   timestamp,
+  unique,
+  uuid,
 } from "drizzle-orm/pg-core";
 
 const tz = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
@@ -89,7 +91,56 @@ export const alertDeliveries = pgTable(
   (t) => [primaryKey({ columns: [t.eventId, t.startsAt] })],
 );
 
+/**
+ * "Copy events from `sourceGuildId` (optionally just `sourceEventId`) into
+ * `targetGuildId`". Created by `/sync` in the target server.
+ */
+export const syncLinks = pgTable(
+  "sync_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    targetGuildId: text("target_guild_id")
+      .notNull()
+      .references(() => guilds.id, { onDelete: "cascade" }),
+    sourceGuildId: text("source_guild_id").notNull(),
+    /** null = every event of the source guild. */
+    sourceEventId: text("source_event_id"),
+    createdBy: text("created_by").notNull(),
+    createdAt: tz("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    unique("sync_links_unique").on(t.targetGuildId, t.sourceGuildId, t.sourceEventId).nullsNotDistinct(),
+    index("sync_links_source_idx").on(t.sourceGuildId),
+  ],
+);
+
+export type MirrorStatus = "active" | "removing" | "detached";
+
+/**
+ * A copy of a source event inside a target guild. Keyed by (target, source
+ * event) so overlapping links still produce one mirror. `detached` marks a
+ * mirror someone deleted by hand: it is not re-created.
+ */
+export const syncMirrors = pgTable(
+  "sync_mirrors",
+  {
+    targetGuildId: text("target_guild_id")
+      .notNull()
+      .references(() => guilds.id, { onDelete: "cascade" }),
+    sourceEventId: text("source_event_id").notNull(),
+    /** Discord id of the mirror; null while the create call is in flight. */
+    targetEventId: text("target_event_id").unique(),
+    status: text("status").$type<MirrorStatus>().notNull(),
+    /** Source `sequence` last copied, so unchanged events are skipped. */
+    sourceSequence: integer("source_sequence").notNull().default(-1),
+    updatedAt: tz("updated_at").notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.targetGuildId, t.sourceEventId] })],
+);
+
 export type Guild = typeof guilds.$inferSelect;
+export type SyncLink = typeof syncLinks.$inferSelect;
+export type SyncMirror = typeof syncMirrors.$inferSelect;
 export type ScheduledEvent = typeof scheduledEvents.$inferSelect;
 export type NewScheduledEvent = typeof scheduledEvents.$inferInsert;
 export type Rsvp = typeof rsvps.$inferSelect;

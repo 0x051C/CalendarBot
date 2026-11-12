@@ -26,6 +26,7 @@ JetStream leases**, fail over automatically when an instance dies, and use
 - **Per-server lead time:** `/alert lead-time 30`. Pending alerts follow the new value automatically.
 - **iCalendar export:** one `.ics` per server. Edits bump `SEQUENCE`, and cancellations publish `STATUS:CANCELLED`, so subscribed calendars stay correct.
 - **Alerts stay current:** cancelling or editing an event updates alerts that were already posted.
+- **Cross-server event sync:** `/sync server` or `/sync event` mirrors another server's events into this one. Edits and cancellations follow automatically, even when the two servers are served by different instances.
 - **No privileged intents:** only `Guilds` and `GuildScheduledEvents`.
 
 ### Commands
@@ -38,6 +39,17 @@ All under `/alert` and restricted to members with **Manage Server**:
 | `/alert channel channel:<#channel>` | Always post alerts in this channel (checks the bot's permissions first) |
 | `/alert channel-reset` | Go back to automatic channel selection |
 | `/alert settings` | Current settings, the resolved channel, and the next alerts |
+
+Event sync, run in the server that should *receive* the events. It needs **Manage Events** there *and* in the source server:
+
+| Command | Effect |
+| --- | --- |
+| `/sync server server:<id>` | Mirror every upcoming event of another server here |
+| `/sync event link:<event link>` | Mirror a single event |
+| `/sync list` | What this server is syncing |
+| `/sync remove sync:<choice>` | Stop a sync and delete the events it created here |
+
+Mirrors are external events that link back to the original. Deleting one by hand keeps it deleted. Syncing A→B and B→A doesn't loop.
 
 ## Distributed design at a glance
 
@@ -61,6 +73,8 @@ gateway   │ shards 0,1 │  │ shards 2,3 │  │ shard 4    │   gateway
 - **Self-fencing:** an instance that can't renew a lease drops the shard itself before anyone else can claim it.
 - **Exactly-once alerts:** due alerts are derived from SQL every tick (no in-memory timers), and sending requires winning an `INSERT … ON CONFLICT` claim.
 - **Cluster-wide identify throttling:** a NATS-backed limiter plugged into discord.js keeps every process within Discord's IDENTIFY rate limit.
+- **Shard-addressed RPC:** whoever leases shard *N* answers `calendarbot.shard.N.rpc`, so `/sync` can check a server served by another instance without knowing which one.
+- **Durable sync queue:** event changes go to a JetStream work queue with one durable consumer per shard. A new shard owner resumes the same consumer, so nothing published during a failover is lost.
 
 ## Quick start (Docker Compose)
 
@@ -121,6 +135,7 @@ curl localhost:8080/readyz          # NATS + Postgres + every leased shard conne
 curl localhost:8080/metrics         # Prometheus metrics
 nats micro ls                       # every live instance
 nats req calendarbot.cluster ''     # shard → instance map
+nats consumer ls calendarbot_sync   # per-shard durable sync queues
 ```
 
 ## Development

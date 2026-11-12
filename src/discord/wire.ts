@@ -3,6 +3,7 @@ import type { GuildRepository } from "../db/repos/guilds";
 import type { Logger } from "../logger";
 import type { Metrics } from "../metrics";
 import { alertCommandDefinition, type AlertCommand } from "./commands/alert-command";
+import { syncCommandDefinition, type SyncCommand } from "./commands/sync-command";
 import { parseCustomId } from "./custom-ids";
 import type { EventSync } from "./event-sync";
 import type { ButtonHandler } from "./interactions/buttons";
@@ -13,14 +14,17 @@ export interface WireDeps {
   eventSync: EventSync;
   guilds: GuildRepository;
   alertCommand: AlertCommand;
+  syncCommand: SyncCommand;
   buttons: ButtonHandler;
+  /** Called once a shard has reconciled all its guilds (catch up on event sync). */
+  onShardSynced?: (shardId: number) => Promise<void>;
   registerCommands: boolean;
   logger: Logger;
   metrics: Metrics;
 }
 
 /** Attach all gateway event handlers for one shard's client. */
-export function wireClient(client: Client, shardId: number, deps: WireDeps): void {
+export function wireClient(client: Client, shardId: number, deps: WireDeps, isActive: () => boolean = () => true): void {
   const log = deps.logger.child({ shard: shardId });
   const cleanedLegacyCommands = new Set<string>();
 
@@ -36,6 +40,7 @@ export function wireClient(client: Client, shardId: number, deps: WireDeps): voi
     return run;
   };
   const syncGuild = async (guild: Guild) => {
+    if (!isActive()) return; // shard was released while this was queued
     try {
       await deps.eventSync.syncGuild(guild);
       if (deps.registerCommands && !cleanedLegacyCommands.has(guild.id)) {
@@ -52,18 +57,23 @@ export function wireClient(client: Client, shardId: number, deps: WireDeps): voi
     }
   };
   const safe = <A extends unknown[]>(name: string, fn: (...args: A) => Promise<unknown>) =>
-    (...args: A) => void fn(...args).catch((err) => log.error({ err }, `${name} handler failed`));
+    (...args: A) => {
+      if (!isActive()) return;
+      void fn(...args).catch((err) => log.error({ err }, `${name} handler failed`));
+    };
 
   client.on(Events.ClientReady, async (c) => {
+    if (!isActive()) return;
     log.info({ user: c.user.tag, guilds: c.guilds.cache.size }, "shard ready");
     if (shardId === 0 && deps.registerCommands) {
       // Global commands are cluster-wide; the shard-0 owner keeps them current.
       await c.application.commands
-        .set([alertCommandDefinition.toJSON()])
+        .set([alertCommandDefinition.toJSON(), syncCommandDefinition.toJSON()])
         .then(() => log.info("registered global slash commands"))
         .catch((err) => log.error({ err }, "failed to register slash commands"));
     }
     for (const guild of c.guilds.cache.values()) await sync(guild);
+    await deps.onShardSynced?.(shardId).catch((err) => log.error({ err }, "post-sync hook failed"));
   });
 
   client.on(Events.GuildCreate, (g) => void sync(g, { force: true })); // bot added to a server
@@ -87,16 +97,24 @@ export function wireClient(client: Client, shardId: number, deps: WireDeps): voi
   client.on(Events.GuildScheduledEventUserAdd, (e) => attendance(e));
   client.on(Events.GuildScheduledEventUserRemove, (e) => attendance(e));
 
-  client.on(Events.InteractionCreate, (i) => void handleInteraction(i, deps, log));
+  client.on(Events.InteractionCreate, (i) => {
+    if (isActive()) void handleInteraction(i, deps, log);
+  });
 }
 
 async function handleInteraction(interaction: Interaction, deps: WireDeps, log: Logger) {
   if (!interaction.inCachedGuild()) return;
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === "sync") await deps.syncCommand.autocomplete(interaction).catch(() => {});
+    return;
+  }
   const kind = interaction.isChatInputCommand() ? "command" : interaction.isButton() ? "button" : null;
   if (!kind) return;
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === "alert") {
       await deps.alertCommand.handle(interaction);
+    } else if (interaction.isChatInputCommand() && interaction.commandName === "sync") {
+      await deps.syncCommand.handle(interaction);
     } else if (interaction.isButton()) {
       const action = parseCustomId(interaction.customId);
       if (!action) return;

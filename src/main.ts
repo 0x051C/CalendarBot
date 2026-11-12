@@ -1,4 +1,4 @@
-import { REST, Routes, type RESTGetAPIGatewayBotResult } from "discord.js";
+import { REST, Routes, type RESTGetAPIGatewayBotResult, type RESTGetAPIUserResult } from "discord.js";
 import pkg from "../package.json" with { type: "json" };
 import { AlertScheduler } from "./alerts/alert-scheduler";
 import { AlertService } from "./alerts/alert-service";
@@ -6,6 +6,8 @@ import { CalendarExporter } from "./calendar/exporter";
 import { NatsIdentifyThrottler } from "./cluster/identify-throttler";
 import { agreeOnShardCount, connectNats, openBuckets } from "./cluster/nats";
 import { ShardCoordinator } from "./cluster/shard-coordinator";
+import { ShardRpc } from "./cluster/shard-rpc";
+import { SyncFeed } from "./cluster/sync-feed";
 import { startStatusService } from "./cluster/status-service";
 import { loadConfig } from "./config";
 import { connectDatabase } from "./db";
@@ -13,6 +15,9 @@ import { AlertRepository } from "./db/repos/alerts";
 import { EventRepository } from "./db/repos/events";
 import { GuildRepository } from "./db/repos/guilds";
 import { RsvpRepository } from "./db/repos/rsvps";
+import { SyncRepository } from "./db/repos/sync";
+import { SyncCommand } from "./discord/commands/sync-command";
+import { SyncService } from "./sync/sync-service";
 import { AlertCommand } from "./discord/commands/alert-command";
 import { EventSync } from "./discord/event-sync";
 import { ButtonHandler } from "./discord/interactions/buttons";
@@ -24,6 +29,7 @@ import { createLogger } from "./logger";
 import { createMetrics } from "./metrics";
 
 const SHUTDOWN_TIMEOUT_MS = 20_000;
+const SYNC_RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 async function main() {
   const config = loadConfig();
@@ -32,6 +38,7 @@ async function main() {
   logger.info({ version: pkg.version, cluster: config.clusterName }, "starting calendarbot");
 
   // --- Infrastructure -------------------------------------------------------
+  const rest = new REST({ version: "10" }).setToken(config.discordToken);
   const database = connectDatabase(config.databaseUrl, config.instanceId);
   await database.migrate(config.migrationsDir);
   logger.info("database migrations applied");
@@ -40,7 +47,7 @@ async function main() {
   const buckets = await openBuckets(nc, config.clusterName, config.leaseTtlMs);
   const shardCount = await agreeOnShardCount(
     buckets.config,
-    async () => (config.shardCount === "auto" ? recommendedShards(config.discordToken) : config.shardCount),
+    async () => (config.shardCount === "auto" ? recommendedShards(rest) : config.shardCount),
     logger,
   );
   if (config.shardCount !== "auto" && config.shardCount !== shardCount) {
@@ -57,6 +64,8 @@ async function main() {
   const events = new EventRepository(db);
   const alerts = new AlertRepository(db);
   const rsvps = new RsvpRepository(db);
+  const syncRepo = new SyncRepository(db);
+  const botUser = (await rest.get(Routes.user())) as RESTGetAPIUserResult;
 
   const exporter = new CalendarExporter({
     guilds,
@@ -77,6 +86,10 @@ async function main() {
   const alertCommand = new AlertCommand({ guilds, events, defaultLeadMinutes: config.defaultAlertLeadMinutes });
   const buttons = new ButtonHandler({ events, rsvps, alertService, eventSync });
 
+  // Cross-shard plumbing for /sync: shard-addressed RPC + a durable per-shard work queue.
+  const shardRpc = new ShardRpc({ nc, cluster: config.clusterName, shardCount, logger });
+  const syncFeed = await SyncFeed.open(nc, { cluster: config.clusterName, shardCount, logger });
+
   // --- Discord shards -------------------------------------------------------
   let shutdown: (reason: string, code?: number) => Promise<void> = async () => {};
   const shards = new ShardManager({
@@ -92,21 +105,48 @@ async function main() {
           const info = await manager.fetchGatewayInformation();
           return new NatsIdentifyThrottler(buckets.identify, info.session_start_limit.max_concurrency, config.instanceId);
         },
-        wire: (client, id) =>
-          wireClient(client, id, {
+        wire: (client, id, isActive) =>
+          wireClient(
+            client,
+            id,
+            {
             eventSync,
             guilds,
             alertCommand,
+            syncCommand,
             buttons,
+            onShardSynced: (id) => syncService.reconcileShard(id),
             registerCommands: config.registerCommands,
             logger,
             metrics,
-          }),
+            },
+            isActive,
+          ),
         onFatal: (err) => {
           logger.fatal({ err }, "unrecoverable Discord error (check DISCORD_TOKEN)");
           void shutdown("fatal discord error", 1);
         },
       }),
+  });
+
+  const syncService = new SyncService({
+    sync: syncRepo,
+    feed: syncFeed,
+    rpc: shardRpc,
+    shards,
+    botUserId: botUser.id,
+    defaultDurationSeconds: config.icalEventDurationSeconds,
+    logger,
+  });
+  eventSync.setHooks({
+    sourceChanged: (guildId, eventIds, reason) => syncService.notifySourceChanged(guildId, eventIds, reason),
+    eventDeleted: (eventId) => syncService.onEventDeleted(eventId),
+  });
+  const syncCommand = new SyncCommand({
+    sync: syncRepo,
+    guilds,
+    syncService,
+    defaultLeadMinutes: config.defaultAlertLeadMinutes,
   });
 
   const coordinator = new ShardCoordinator({
@@ -119,10 +159,16 @@ async function main() {
   });
   coordinator.on("acquired", (id) => {
     metrics.leaseEvents.inc({ event: "acquired" });
+    shardRpc.serve(id);
+    void syncFeed
+      .consume(id, syncService.handleNotice)
+      .catch((err) => logger.error({ err, shardId: id }, "failed to start sync consumer"));
     void shards.start(id);
   });
   coordinator.on("released", (id, reason) => {
     metrics.leaseEvents.inc({ event: reason });
+    shardRpc.unserve(id);
+    void syncFeed.stopConsuming(id);
     void shards.stop(id);
   });
 
@@ -171,6 +217,7 @@ async function main() {
 
   coordinator.start();
   scheduler.start();
+  syncService.startPeriodic(SYNC_RECONCILE_INTERVAL_MS);
   logger.info({ shardCount, leaseTtlMs: config.leaseTtlMs }, "joined cluster");
 
   // --- Graceful shutdown ----------------------------------------------------
@@ -186,6 +233,9 @@ async function main() {
     force.unref();
     try {
       await scheduler.stop();
+      syncService.stop();
+      shardRpc.stop();
+      await syncFeed.stop();
       // Close gateway sessions before handing leases back, so two instances
       // never serve the same shard at once.
       await shards.stopAll();
@@ -207,8 +257,7 @@ async function main() {
   process.on("unhandledRejection", (err) => logger.error({ err }, "unhandled promise rejection"));
 }
 
-async function recommendedShards(token: string): Promise<number> {
-  const rest = new REST({ version: "10" }).setToken(token);
+async function recommendedShards(rest: REST): Promise<number> {
   const info = (await rest.get(Routes.gatewayBot())) as RESTGetAPIGatewayBotResult;
   return info.shards;
 }
