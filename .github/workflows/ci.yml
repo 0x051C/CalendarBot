@@ -25,7 +25,7 @@ jobs:
 
       # Cluster tests run against a real JetStream-enabled NATS server.
       - name: Start NATS
-        run: docker run -d --name nats -p 4222:4222 nats:2.12-alpine -js
+        run: docker run -d --name nats -p 4222:4222 nats:2.15-alpine -js
       - name: Test
         run: bun test
         env:
@@ -50,6 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -75,6 +76,8 @@ jobs:
       - uses: docker/build-push-action@v7
         with:
           context: .
+          # arm64 so the image also runs on Raspberry Pi and Graviton
+          platforms: linux/amd64,linux/arm64
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

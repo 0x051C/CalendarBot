@@ -1,5 +1,7 @@
 # --- Build: typecheck and bundle with Bun ------------------------------------
-FROM oven/bun:1 AS build
+# The output is plain JavaScript, so build once on the native builder platform
+# even when producing images for other architectures.
+FROM --platform=$BUILDPLATFORM oven/bun:1 AS build
 WORKDIR /src
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
