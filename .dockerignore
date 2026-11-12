@@ -7,3 +7,6 @@ ical
 .env*
 ecosystem.*
 CalendarBot
+test
+.scratch
+deploy

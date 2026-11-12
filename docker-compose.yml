@@ -1,0 +1,53 @@
+# Full local cluster: Postgres + NATS (JetStream) + 2 bot instances sharing the shards.
+#
+#   echo "DISCORD_TOKEN=..." > .env
+#   docker compose up --build
+#   docker compose up --scale bot=3      # add an instance; shards rebalance
+#   docker compose kill bot-1            # crash one; its shards fail over within LEASE_TTL_MS
+name: calendarbot
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: calendarbot
+      POSTGRES_PASSWORD: calendarbot
+      POSTGRES_DB: calendarbot
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U calendarbot"]
+      interval: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.12-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes: [natsdata:/data]
+    ports: ["4222:4222", "8222:8222"]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      retries: 10
+
+  bot:
+    build: .
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?Set DISCORD_TOKEN in .env}
+      DATABASE_URL: postgres://calendarbot:calendarbot@postgres:5432/calendarbot
+      NATS_URL: nats://nats:4222
+      SHARD_COUNT: ${SHARD_COUNT:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    deploy:
+      replicas: 2
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    volumes: [ical:/data]
+    ports: ["8080"] # random host port per replica: `docker compose port --index 1 bot 8080`
+    stop_grace_period: 25s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  natsdata:
+  ical:
