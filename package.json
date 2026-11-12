@@ -1,6 +1,6 @@
 {
   "name": "calendarbot",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Discord bot that announces scheduled events, tracks RSVPs with buttons, and exports each server's events as an iCalendar (.ics) feed.",
   "module": "src/main.ts",
   "type": "module",

@@ -141,3 +141,30 @@ describe("NatsIdentifyThrottler", () => {
     await expect(t.waitForIdentify(0, ac.signal)).rejects.toThrow("shutdown");
   });
 });
+
+describe("shard count validation", () => {
+  test("an invalid stored shard count is reported instead of used", async () => {
+    const { buckets } = await cluster(1);
+    await buckets.config.put("shard_count", "undefined");
+    await expect(agreeOnShardCount(buckets.config, async () => 1, silentLogger)).rejects.toThrow(/invalid/);
+  });
+  test("an invalid resolved shard count is never stored", async () => {
+    const { buckets } = await cluster(1);
+    await expect(agreeOnShardCount(buckets.config, async () => Number.NaN, silentLogger)).rejects.toThrow(/invalid/);
+    expect(await buckets.config.get("shard_count")).toBeNull();
+  });
+});
+
+describe("ShardCoordinator.release", () => {
+  test("hands a shard back so another instance can claim it", async () => {
+    const { make } = await cluster(1, 60_000);
+    const a = make("a");
+    const b = make("b");
+    await a.tick();
+    await a.release(0);
+    expect(a.owns(0)).toBe(false);
+    await b.tick();
+    expect(b.ownedShards()).toEqual([0]);
+    await Promise.all([a.stop(), b.stop()]);
+  });
+});

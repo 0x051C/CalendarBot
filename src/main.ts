@@ -9,7 +9,7 @@ import { ShardCoordinator } from "./cluster/shard-coordinator";
 import { ShardRpc } from "./cluster/shard-rpc";
 import { SyncFeed } from "./cluster/sync-feed";
 import { startStatusService } from "./cluster/status-service";
-import { loadConfig } from "./config";
+import { loadConfig, scrubDiscordShardingEnv } from "./config";
 import { connectDatabase } from "./db";
 import { AlertRepository } from "./db/repos/alerts";
 import { EventRepository } from "./db/repos/events";
@@ -33,6 +33,7 @@ const SYNC_RECONCILE_INTERVAL_MS = 5 * 60_000;
 
 async function main() {
   const config = loadConfig();
+  scrubDiscordShardingEnv();
   const logger = createLogger(config.logLevel, config.instanceId);
   const metrics = createMetrics();
   logger.info({ version: pkg.version, cluster: config.clusterName }, "starting calendarbot");
@@ -167,7 +168,11 @@ async function main() {
     void syncFeed
       .consume(id, syncService.handleNotice)
       .catch((err) => logger.error({ err, shardId: id }, "failed to start sync consumer"));
-    void shards.start(id);
+    shards.start(id).catch((err) => {
+      // Don't sit on a lease we can't serve: hand it back so another instance can try.
+      logger.error({ err, shardId: id }, "failed to start shard; releasing its lease");
+      void coordinator.release(id);
+    });
   });
   coordinator.on("released", (id, reason) => {
     metrics.leaseEvents.inc({ event: reason });
@@ -205,7 +210,8 @@ async function main() {
           checks: {
             nats: () => !nc.isClosed() && !nc.isDraining(),
             database: () => database.ping(),
-            shards: () => ({ owned: shards.ownedShardIds(), ready: shards.readyShardIds() }),
+            // Leased shards, not started clients: a shard whose client failed to start is not ready.
+            shards: () => ({ owned: coordinator.ownedShards(), ready: shards.readyShardIds() }),
           },
           beforeScrape: () => {
             metrics.shardsOwned.set(coordinator.ownedShards().length);

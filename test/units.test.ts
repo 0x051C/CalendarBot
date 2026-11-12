@@ -164,3 +164,21 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ SHARD_COUNT: "0" })).toThrow(/DISCORD_TOKEN[\s\S]*DATABASE_URL[\s\S]*SHARD_COUNT/);
   });
 });
+
+describe("discord.js sharding environment (production incident, v2.0.0)", () => {
+  test("SHARD_COUNT=auto in the environment breaks a 1-shard Client unless scrubbed", async () => {
+    const { Client, GatewayIntentBits } = await import("discord.js");
+    const { scrubDiscordShardingEnv } = await import("../src/config");
+    const make = () => new Client({ intents: [GatewayIntentBits.Guilds], shards: [0], shardCount: 1 });
+    const saved = process.env.SHARD_COUNT;
+    try {
+      process.env.SHARD_COUNT = "auto";
+      expect(make).toThrow(/shardCount/);
+      scrubDiscordShardingEnv();
+      expect("SHARD_COUNT" in process.env).toBe(false);
+      expect(() => make().destroy()).not.toThrow();
+    } finally {
+      if (saved !== undefined) process.env.SHARD_COUNT = saved;
+    }
+  });
+});
