@@ -54,6 +54,18 @@ const schema = z.object({
 
 export type Config = ReturnType<typeof loadConfig>;
 
+/**
+ * discord.js treats SHARDS / SHARD_COUNT in the environment as instructions
+ * from its own ShardingManager: whenever a Client is created with the default
+ * shardCount (1), it replaces it with Number(process.env.SHARD_COUNT). With
+ * SHARD_COUNT=auto that is NaN and the client refuses to start. Our config has
+ * already read these, so remove them before any Client is constructed.
+ */
+export function scrubDiscordShardingEnv(env: Record<string, string | undefined> = process.env): void {
+  delete env.SHARD_COUNT;
+  delete env.SHARDS;
+}
+
 export type NatsAuth =
   | { kind: "none" }
   | { kind: "userpass"; user: string; pass: string }

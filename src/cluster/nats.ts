@@ -77,13 +77,18 @@ export async function agreeOnShardCount(
   resolveLocal: () => Promise<number>,
   logger: Logger,
 ): Promise<number> {
+  const valid = (n: number) => Number.isInteger(n) && n >= 1 && n <= 4096;
   const existing = await config.get("shard_count");
   if (existing?.operation === "PUT") {
     const stored = Number(existing.string());
+    if (!valid(stored)) {
+      throw new Error(`cluster shard_count in NATS is invalid (${JSON.stringify(existing.string())}); delete it and restart`);
+    }
     logger.info({ shardCount: stored }, "using cluster shard count");
     return stored;
   }
   const local = await resolveLocal();
+  if (!valid(local)) throw new Error(`refusing to store invalid shard count ${local}`);
   try {
     await config.create("shard_count", String(local));
     logger.info({ shardCount: local }, "initialised cluster shard count");

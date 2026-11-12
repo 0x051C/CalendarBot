@@ -213,6 +213,14 @@ export class ShardCoordinator extends EventEmitter<CoordinatorEvents> {
     }
   }
 
+  /** Give a shard back voluntarily (e.g. its gateway client could not be started). */
+  async release(shardId: number): Promise<void> {
+    const lease = this.owned.get(shardId);
+    if (!lease) return;
+    this.drop(shardId, "rebalance");
+    await this.opts.leases.delete(leaseKey(shardId), { previousSeq: lease.revision }).catch(() => {});
+  }
+
   private drop(shardId: number, reason: ReleaseReason) {
     if (!this.owned.delete(shardId)) return;
     this.emit("released", shardId, reason);
