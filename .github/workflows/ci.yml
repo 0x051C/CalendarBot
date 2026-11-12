@@ -23,13 +23,16 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
 
-      # Cluster tests run against a real JetStream-enabled NATS server.
-      - name: Start NATS
-        run: docker run -d --name nats -p 4222:4222 nats:2.15-alpine -js
+      # Cluster and auth tests start their own throwaway JetStream servers.
+      - name: Install nats-server
+        run: |
+          V=v2.15.3; A=nats-server-$V-linux-amd64.tar.gz
+          curl -fsSLO "https://github.com/nats-io/nats-server/releases/download/$V/$A"
+          curl -fsSL "https://github.com/nats-io/nats-server/releases/download/$V/SHA256SUMS" | grep " $A\$" | sha256sum -c -
+          tar -xzf "$A" && sudo install -m 755 "nats-server-$V-linux-amd64/nats-server" /usr/local/bin/
+          nats-server --version
       - name: Test
         run: bun test
-        env:
-          NATS_TEST_URL: nats://127.0.0.1:4222
 
       - run: bun run build
       - name: Validate docker-compose.yml
