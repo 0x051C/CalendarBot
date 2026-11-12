@@ -14,10 +14,15 @@ export interface DatabaseHandle {
   close(): Promise<void>;
 }
 
-export function connectDatabase(url: string): DatabaseHandle & {
+export function connectDatabase(url: string, instanceId = "calendarbot"): DatabaseHandle & {
   migrate(migrationsFolder: string): Promise<void>;
 } {
-  const client = postgres(url, { max: 5, onnotice: () => {} });
+  const client = postgres(url, {
+    max: 5,
+    onnotice: () => {},
+    // Shows up in pg_stat_activity, so DBAs can tell which instance owns a connection.
+    connection: { application_name: `calendarbot:${instanceId}`.slice(0, 63) },
+  });
   const db = drizzle(client, { schema });
   return {
     db: db as unknown as Database,

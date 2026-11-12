@@ -32,7 +32,7 @@ async function main() {
   logger.info({ version: pkg.version, cluster: config.clusterName }, "starting calendarbot");
 
   // --- Infrastructure -------------------------------------------------------
-  const database = connectDatabase(config.databaseUrl);
+  const database = connectDatabase(config.databaseUrl, config.instanceId);
   await database.migrate(config.migrationsDir);
   logger.info("database migrations applied");
 
