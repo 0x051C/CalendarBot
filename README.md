@@ -109,13 +109,24 @@ For production, `bun run build` emits `release/main.mjs` plus `release/drizzle/`
 which run on **Node ≥ 22** with no `node_modules`. `deploy/ecosystem.config.cjs`
 is a ready-made pm2 config: run it on as many hosts as you like.
 
+`deploy/setup-pi.sh` provisions a single host (tested on a Raspberry Pi Zero 2 W)
+with PostgreSQL tuned for low memory and NATS 2.15 with JetStream. Both listen
+on localhost only and require credentials. The bot gets its **own NATS account**
+(`deploy/nats-server.conf.example`), an isolated namespace whose subjects,
+KV buckets and streams no other client can see. The script generates random
+passwords straight into the bot's `.env`.
+
 ## Configuration
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `DISCORD_TOKEN` | — | Bot token (**required**) |
 | `DATABASE_URL` | — | `postgres://…` (**required**) |
-| `NATS_URL` | `nats://localhost:4222` | Comma-separate several servers |
+| `NATS_URL` | `nats://localhost:4222` | Comma-separate several servers. `tls://` enables TLS |
+| `NATS_USER` / `NATS_PASSWORD` | — | NATS user credentials |
+| `NATS_TOKEN` | — | NATS token auth (alternative) |
+| `NATS_CREDS` | — | NKey/JWT `.creds` file (alternative) |
+| `NATS_TLS_CA` | — | CA bundle for NATS TLS |
 | `CLUSTER_NAME` | `calendarbot` | Namespace for NATS buckets and subjects |
 | `SHARD_COUNT` | `auto` | Total shards across the cluster. The first instance's value is stored and shared |
 | `LEASE_TTL_MS` | `15000` | Shard lease lifetime ≈ failover time |
@@ -126,6 +137,7 @@ is a ready-made pm2 config: run it on as many hosts as you like.
 | `ICAL_EVENT_DURATION_SECONDS` | `1800` | End time for events that have none |
 | `REGISTER_COMMANDS` | `true` | Set `false` for staging instances sharing a production token |
 | `HTTP_PORT` | `8080` | Health/metrics server (`0` disables) |
+| `HTTP_HOST` | `0.0.0.0` | Interface for the health/metrics server; use `127.0.0.1` outside containers |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, … |
 
 ## Operations

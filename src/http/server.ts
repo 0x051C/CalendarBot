@@ -17,6 +17,7 @@ export interface HealthChecks {
  */
 export function startHttpServer(opts: {
   port: number;
+  host?: string;
   metrics: Metrics;
   checks: HealthChecks;
   beforeScrape?: () => void;
@@ -54,8 +55,8 @@ export function startHttpServer(opts: {
     }
   });
   return new Promise((resolve) =>
-    server.listen(opts.port, () => {
-      opts.logger.info({ port: opts.port }, "http server listening");
+    server.listen(opts.port, opts.host ?? "0.0.0.0", () => {
+      opts.logger.info({ host: opts.host ?? "0.0.0.0", port: opts.port }, "http server listening");
       resolve(server);
     }),
   );

@@ -43,7 +43,10 @@ async function main() {
   await database.migrate(config.migrationsDir);
   logger.info("database migrations applied");
 
-  const nc = await connectNats(config.natsUrl, config.instanceId, logger);
+  const nc = await connectNats(
+    { url: config.natsUrl, instanceId: config.instanceId, auth: config.natsAuth, tlsCa: config.natsTlsCa },
+    logger,
+  );
   const buckets = await openBuckets(nc, config.clusterName, config.leaseTtlMs);
   const shardCount = await agreeOnShardCount(
     buckets.config,
@@ -196,6 +199,7 @@ async function main() {
     config.httpPort > 0
       ? await startHttpServer({
           port: config.httpPort,
+          host: config.httpHost,
           metrics,
           logger,
           checks: {

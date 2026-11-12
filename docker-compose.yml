@@ -23,7 +23,8 @@ services:
     image: nats:2.15-alpine
     command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes: [natsdata:/data]
-    ports: ["4222:4222", "8222:8222"]
+    # Loopback only: this dev stack runs NATS without auth (see deploy/nats-server.conf.example for production).
+    ports: ["127.0.0.1:4222:4222", "127.0.0.1:8222:8222"]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
       interval: 5s
@@ -43,7 +44,7 @@ services:
       postgres: { condition: service_healthy }
       nats: { condition: service_healthy }
     volumes: [ical:/data]
-    ports: ["8080"] # random host port per replica: `docker compose port --index 1 bot 8080`
+    ports: ["127.0.0.1::8080"] # random loopback port per replica: `docker compose port --index 1 bot 8080`
     stop_grace_period: 25s
     restart: unless-stopped
 

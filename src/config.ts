@@ -13,6 +13,13 @@ const schema = z.object({
   DISCORD_TOKEN: z.string().min(1, "DISCORD_TOKEN is required"),
   DATABASE_URL: z.string().url("DATABASE_URL must be a postgres:// URL"),
   NATS_URL: z.string().default("nats://localhost:4222"),
+  /** NATS auth: user + password, a token, or a .creds file (NKey/JWT). Pick one. */
+  NATS_USER: z.string().min(1).optional(),
+  NATS_PASSWORD: z.string().min(1).optional(),
+  NATS_TOKEN: z.string().min(1).optional(),
+  NATS_CREDS: z.string().min(1).optional(),
+  /** CA bundle for NATS TLS (implies TLS). `tls://` URLs also enable TLS. */
+  NATS_TLS_CA: z.string().min(1).optional(),
 
   /** Namespace for NATS KV buckets and subjects; lets several deployments share one NATS. */
   CLUSTER_NAME: z
@@ -36,6 +43,8 @@ const schema = z.object({
   ICAL_EVENT_DURATION: int(60).optional(),
 
   HTTP_PORT: int(0, 65_535).default(8080),
+  /** Interface for /healthz /readyz /metrics. 0.0.0.0 suits containers; use 127.0.0.1 on a host. */
+  HTTP_HOST: z.string().min(1).default("0.0.0.0"),
   MIGRATIONS_DIR: z.string().default("./drizzle"),
   REGISTER_COMMANDS: bool.default(true),
   LOG_LEVEL: z
@@ -45,8 +54,24 @@ const schema = z.object({
 
 export type Config = ReturnType<typeof loadConfig>;
 
+export type NatsAuth =
+  | { kind: "none" }
+  | { kind: "userpass"; user: string; pass: string }
+  | { kind: "token"; token: string }
+  | { kind: "creds"; file: string };
+
 export function loadConfig(env: Record<string, string | undefined> = process.env) {
-  const parsed = schema.safeParse(env);
+  const parsed = schema
+    .superRefine((e, ctx) => {
+      const methods = [e.NATS_USER || e.NATS_PASSWORD ? "user" : null, e.NATS_TOKEN ? "token" : null, e.NATS_CREDS ? "creds" : null];
+      if (methods.filter(Boolean).length > 1) {
+        ctx.addIssue({ code: "custom", path: ["NATS_USER"], message: "use only one of NATS_USER/NATS_PASSWORD, NATS_TOKEN or NATS_CREDS" });
+      }
+      if (Boolean(e.NATS_USER) !== Boolean(e.NATS_PASSWORD)) {
+        ctx.addIssue({ code: "custom", path: ["NATS_PASSWORD"], message: "NATS_USER and NATS_PASSWORD must be set together" });
+      }
+    })
+    .safeParse(env);
   if (!parsed.success) {
     const issues = parsed.error.issues
       .map((i) => `  - ${i.path.join(".")}: ${i.message}`)
@@ -58,6 +83,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     discordToken: e.DISCORD_TOKEN,
     databaseUrl: e.DATABASE_URL,
     natsUrl: e.NATS_URL,
+    natsAuth: (e.NATS_USER && e.NATS_PASSWORD
+      ? { kind: "userpass", user: e.NATS_USER, pass: e.NATS_PASSWORD }
+      : e.NATS_TOKEN
+        ? { kind: "token", token: e.NATS_TOKEN }
+        : e.NATS_CREDS
+          ? { kind: "creds", file: e.NATS_CREDS }
+          : { kind: "none" }) as NatsAuth,
+    natsTlsCa: e.NATS_TLS_CA ?? null,
     clusterName: e.CLUSTER_NAME,
     instanceId:
       e.INSTANCE_ID ?? `${os.hostname()}-${randomBytes(3).toString("hex")}`,
@@ -69,6 +102,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     icalEventDurationSeconds:
       e.ICAL_EVENT_DURATION_SECONDS ?? e.ICAL_EVENT_DURATION ?? 1800,
     httpPort: e.HTTP_PORT,
+    httpHost: e.HTTP_HOST,
     migrationsDir: e.MIGRATIONS_DIR,
     registerCommands: e.REGISTER_COMMANDS,
     logLevel: e.LOG_LEVEL,

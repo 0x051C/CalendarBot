@@ -1,4 +1,6 @@
-import { connect, type NatsConnection } from "@nats-io/transport-node";
+import { readFileSync } from "node:fs";
+import { connect, credsAuthenticator, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
+import type { NatsAuth } from "../config";
 import { Kvm, type KV } from "@nats-io/kv";
 import type { Logger } from "../logger";
 
@@ -16,13 +18,33 @@ export interface ClusterBuckets {
   config: KV;
 }
 
-export async function connectNats(url: string, instanceId: string, logger: Logger): Promise<NatsConnection> {
-  const nc = await connect({
-    servers: url.split(",").map((s) => s.trim()),
-    name: `calendarbot:${instanceId}`,
+export interface NatsConnectOptions {
+  url: string;
+  instanceId: string;
+  auth?: NatsAuth;
+  /** CA bundle for TLS; TLS is also enabled for `tls://` URLs. */
+  tlsCa?: string | null;
+}
+
+/** Translate our config into nats.js connection options. Exported for tests. */
+export function natsConnectionOptions(o: NatsConnectOptions): NodeConnectionOptions {
+  const servers = o.url.split(",").map((s) => s.trim());
+  const auth = o.auth ?? { kind: "none" };
+  const tls = o.tlsCa ? { caFile: o.tlsCa } : servers.some((s) => s.startsWith("tls://")) ? {} : undefined;
+  return {
+    servers,
+    name: `calendarbot:${o.instanceId}`,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 1_000,
-  });
+    ...(tls ? { tls } : {}),
+    ...(auth.kind === "userpass" ? { user: auth.user, pass: auth.pass } : {}),
+    ...(auth.kind === "token" ? { token: auth.token } : {}),
+    ...(auth.kind === "creds" ? { authenticator: credsAuthenticator(readFileSync(auth.file)) } : {}),
+  };
+}
+
+export async function connectNats(o: NatsConnectOptions, logger: Logger): Promise<NatsConnection> {
+  const nc = await connect(natsConnectionOptions(o));
   void (async () => {
     for await (const s of nc.status()) {
       if (s.type === "disconnect" || s.type === "reconnect" || s.type === "error") {
@@ -30,7 +52,7 @@ export async function connectNats(url: string, instanceId: string, logger: Logge
       }
     }
   })();
-  logger.info({ server: nc.getServer() }, "connected to nats");
+  logger.info({ server: nc.getServer(), auth: o.auth?.kind ?? "none", tls: Boolean(natsConnectionOptions(o).tls) }, "connected to nats");
   return nc;
 }
 

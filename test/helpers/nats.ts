@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,17 +18,25 @@ async function freePort(): Promise<number> {
  * Use NATS_TEST_URL if set (CI runs a nats container), otherwise spawn a
  * throwaway JetStream-enabled nats-server from PATH.
  */
-export async function startNats(): Promise<{ url: string; stop: () => Promise<void> }> {
-  if (process.env.NATS_TEST_URL) return { url: process.env.NATS_TEST_URL, stop: async () => {} };
+export async function startNats(opts: { config?: string; probe?: { user: string; pass: string } } = {}): Promise<{
+  url: string;
+  stop: () => Promise<void>;
+}> {
+  if (process.env.NATS_TEST_URL && !opts.config) return { url: process.env.NATS_TEST_URL, stop: async () => {} };
   const port = await freePort();
   const dir = mkdtempSync(path.join(tmpdir(), "calendarbot-nats-"));
-  const proc: ChildProcess = spawn("nats-server", ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", dir], {
-    stdio: "ignore",
-  });
+  let args = ["-js", "-a", "127.0.0.1", "-p", String(port), "-sd", dir];
+  if (opts.config) {
+    // A full server config (e.g. accounts + users); listen/store are appended for the test.
+    const file = path.join(dir, "nats.conf");
+    writeFileSync(file, `${opts.config}\nlisten: 127.0.0.1:${port}\njetstream { store_dir: "${dir}" }\n`);
+    args = ["-c", file];
+  }
+  const proc: ChildProcess = spawn("nats-server", args, { stdio: "ignore" });
   const url = `nats://127.0.0.1:${port}`;
   for (let i = 0; i < 50; i++) {
     try {
-      const nc = await connect({ servers: url, reconnect: false });
+      const nc = await connect({ servers: url, reconnect: false, ...(opts.probe ?? {}) });
       await nc.close();
       break;
     } catch {
